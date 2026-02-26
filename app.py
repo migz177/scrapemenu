@@ -11,6 +11,7 @@ Fitur:
 import io
 import time
 import re
+import random
 
 import streamlit as st
 import pandas as pd
@@ -20,6 +21,8 @@ from openpyxl.utils import get_column_letter
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
 # ─────────────────────────────────────────────
@@ -30,6 +33,7 @@ st.set_page_config(
     page_icon="🍔",
     layout="centered",
 )
+
 
 # ─────────────────────────────────────────────
 # CUSTOM CSS
@@ -108,11 +112,11 @@ def setup_driver():
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    # ── Cari binary Chrome/Chromium (Linux untuk Streamlit Cloud) ────────────
+    # Cari binary Chrome/Chromium (Linux untuk Streamlit Cloud)
     CHROME_BINS = [
-        "/usr/bin/chromium-browser",       # Ubuntu (Streamlit Cloud)
-        "/usr/bin/chromium",               # beberapa distro Linux
-        "/usr/bin/google-chrome",          # Chrome di Linux
+        "/usr/bin/chromium-browser",       # Ubuntu
+        "/usr/bin/chromium",               # Debian Bookworm (Streamlit Cloud)
+        "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
     ]
     for path in CHROME_BINS:
@@ -120,7 +124,7 @@ def setup_driver():
             options.binary_location = path
             break
 
-    # ── Cari chromedriver (Linux untuk Streamlit Cloud) ──────────────────────
+    # Cari chromedriver (Linux untuk Streamlit Cloud)
     CHROMEDRIVER_BINS = [
         "/usr/bin/chromedriver",
         "/usr/lib/chromium-browser/chromedriver",
@@ -142,10 +146,7 @@ def setup_driver():
 # SELENIUM: AMBIL NAMA RESTORAN
 # ─────────────────────────────────────────────
 def get_restaurant_name(driver):
-    """
-    Coba ambil nama restoran dari elemen heading,
-    fallback ke <title> halaman.
-    """
+    """Ambil nama restoran dari elemen heading, fallback ke <title>."""
     selectors = [
         '[class*="restaurantName"]',
         '[class*="headerName"]',
@@ -161,7 +162,7 @@ def get_restaurant_name(driver):
         except Exception:
             continue
 
-    # Fallback: title tag  →  "Nama Restoran | GrabFood"
+    # Fallback: title tag → "Nama Restoran | GrabFood"
     try:
         title = driver.title
         if "|" in title:
@@ -229,14 +230,22 @@ def scrape_menu(driver, url, progress_cb=None):
     menu_list: list of dict {'Nama Menu', 'Deskripsi', 'Harga (Rp)', 'Harga'}
     """
     driver.get(url)
-    time.sleep(8)
 
-    # Ambil nama restoran setelah halaman pertama load
+    # Tunggu sampai konten halaman ter-render (lebih reliable dari sleep statis)
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'div.ant-row'))
+        )
+    except Exception:
+        # Jika timeout, tetap lanjut — mungkin selector berubah
+        time.sleep(8)
+
+    # Ambil nama restoran setelah halaman load
     resto_name = get_restaurant_name(driver)
 
     scroll_and_load_menus(driver, max_scrolls=12, progress_cb=progress_cb)
 
-    # Coba selector utama, fallback ke ant-row
+    # Coba selector utama, fallback ke ant-row generik
     menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row[class*="menuItem"]')
     if not menu_items:
         menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row')
@@ -250,7 +259,7 @@ def scrape_menu(driver, url, progress_cb=None):
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
             time.sleep(0.05)
 
-            # ── Nama menu ──────────────────────────────
+            # ── Nama menu ──────────────────────────────────────────────
             menu_name = ''
             try:
                 elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameTitle"]')
@@ -263,10 +272,11 @@ def scrape_menu(driver, url, progress_cb=None):
                     ft = item.text
                     if ft:
                         menu_name = ft.split('\n')[0].strip()
+
             if not menu_name:
                 continue
 
-            # ── Deskripsi ──────────────────────────────
+            # ── Deskripsi ──────────────────────────────────────────────
             description = ''
             try:
                 elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
@@ -280,7 +290,7 @@ def scrape_menu(driver, url, progress_cb=None):
                     description = ' '.join(lines[1:]).strip()
             description = description[:200]
 
-            # ── Harga ──────────────────────────────────
+            # ── Harga ──────────────────────────────────────────────────
             price = None
             try:
                 elem = item.find_element(By.CSS_SELECTOR, '[class*="discountedPrice"]')
@@ -303,6 +313,7 @@ def scrape_menu(driver, url, progress_cb=None):
                 'Harga (Rp)': price,
                 'Harga': f"Rp {price:,}" if price else 'N/A',
             })
+
         except Exception:
             continue
 
@@ -374,17 +385,22 @@ def safe_sheet_name(name, existing_names):
 
 def build_excel(results):
     """
+    Bangun file Excel multi-sheet dari hasil scraping.
     results: list of (resto_name, url, menu_list)
-    Returns bytes dari file Excel.
+    Returns: bytes file Excel
     """
     output = io.BytesIO()
-
     summary_rows = []
     sheet_names = []
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for resto_name, url, menu_list in results:
-            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+            # Guard: jika list kosong, buat DataFrame kosong dengan kolom yang benar
+            if menu_list:
+                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+            else:
+                df = pd.DataFrame(columns=['Nama Menu', 'Deskripsi', 'Harga'])
+
             sheet_name = safe_sheet_name(resto_name, sheet_names)
             sheet_names.append(sheet_name)
             df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
@@ -406,25 +422,21 @@ def build_excel(results):
     output.seek(0)
     wb = load_workbook(output)
 
-    # ── Styling per sheet restoran ────────────────────────────────────────────
-    for i, (resto_name, url, menu_list) in enumerate(results):
-        sheet_name = sheet_names[i]
-        ws = wb[sheet_name]
-
+    # Styling per sheet restoran
+    for i, (resto_name, url, _) in enumerate(results):
+        ws = wb[sheet_names[i]]
         ws["A1"] = "URL"
         ws["B1"] = url
         ws["A1"].font = Font(bold=True)
-
         apply_borders(ws)
-        style_header(ws, header_row=3)            # baris 3 = header df (startrow=2)
+        style_header(ws, header_row=3)   # header dari pandas ada di baris 3 (startrow=2)
         auto_fit_columns(ws)
         ws.freeze_panes = "A4"
 
-    # ── Styling SUMMARY ───────────────────────────────────────────────────────
+    # Styling SUMMARY
     ws_sum = wb["SUMMARY"]
     apply_borders(ws_sum)
     style_header(ws_sum, header_row=1, fill=GRAY_FILL)
-    # Override font color ke hitam untuk header abu-abu
     for cell in ws_sum[1]:
         cell.font = Font(bold=True, color="000000")
     auto_fit_columns(ws_sum)
@@ -459,9 +471,8 @@ def main():
     st.markdown(
         '<div class="sub-title">Masukkan satu atau beberapa link restoran GrabFood '
         'dan dapatkan daftar menu dalam format Excel</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-
     st.markdown("""
     <div class="info-box">
         📌 <strong>Cara pakai:</strong> Tempel satu atau beberapa URL GrabFood (satu URL per baris),
@@ -483,7 +494,7 @@ def main():
     if not run_btn:
         return
 
-    # ── Validasi input ────────────────────────────────────────────────────────
+    # Validasi input
     raw_urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
     if not raw_urls:
         st.error("⚠️ Masukkan minimal satu URL.")
@@ -493,15 +504,15 @@ def main():
     if invalid:
         st.warning(f"⚠️ URL berikut mungkin bukan URL GrabFood: {', '.join(invalid)}")
 
-    # ── Progress containers ───────────────────────────────────────────────────
+    # Progress containers
     overall_text = st.empty()
     overall_bar = st.progress(0)
     detail_text = st.empty()
 
-    results = []          # list of (resto_name, url, menu_list)
+    results = []       # list of (resto_name, url, menu_list)
     failed_urls = []
-
     driver = None
+
     try:
         overall_text.info("🌐 Membuka browser...")
         driver = setup_driver()
@@ -519,10 +530,34 @@ def main():
 
             try:
                 detail_text.caption("  ↳ Membuka halaman...")
-                resto_name, menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
-                menu_list = remove_duplicates(menu_list)
-                results.append((resto_name, url, menu_list))
-                detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
+
+                # Retry otomatis maksimal 3x jika dapat 0 item
+                MAX_RETRY = 3
+                menu_list = []
+                for attempt in range(1, MAX_RETRY + 1):
+                    resto_name, menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
+                    menu_list = remove_duplicates(menu_list)
+
+                    if menu_list:
+                        break
+                    elif attempt < MAX_RETRY:
+                        wait_sec = random.randint(5, 10)
+                        detail_text.caption(
+                            f"  ⚠️ Percobaan {attempt}: 0 menu — "
+                            f"mencoba lagi dalam {wait_sec} detik..."
+                        )
+                        time.sleep(wait_sec)
+
+                if menu_list:
+                    results.append((resto_name, url, menu_list))
+                    detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
+                else:
+                    failed_urls.append(url)
+                    detail_text.caption(
+                        f"  ❌ {resto_name} — 0 menu setelah {MAX_RETRY}x percobaan "
+                        f"(halaman mungkin terblokir)"
+                    )
+
             except Exception as e:
                 failed_urls.append(url)
                 detail_text.caption(f"  ❌ Gagal: {e}")
@@ -544,7 +579,7 @@ def main():
         st.error("❌ Tidak ada data yang berhasil di-scrape.")
         return
 
-    # ── Ringkasan per restoran ────────────────────────────────────────────────
+    # Ringkasan per restoran
     st.markdown("---")
     st.subheader("📊 Hasil Scraping")
 
@@ -552,8 +587,8 @@ def main():
         st.markdown(f'<div class="resto-header">🏪 {resto_name}</div>', unsafe_allow_html=True)
 
         prices = [m['Harga (Rp)'] for m in menu_list if m['Harga (Rp)']]
-        avg = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
-        low = f"Rp {min(prices):,}" if prices else "N/A"
+        avg  = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
+        low  = f"Rp {min(prices):,}" if prices else "N/A"
         high = f"Rp {max(prices):,}" if prices else "N/A"
 
         c1, c2, c3, c4 = st.columns(4)
@@ -563,10 +598,13 @@ def main():
         with c4: st.markdown(stat_card("Tertinggi", high, small=True), unsafe_allow_html=True)
 
         with st.expander(f"📋 Preview menu {resto_name}"):
-            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-            st.dataframe(df, use_container_width=True, height=250)
+            if menu_list:
+                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+                st.dataframe(df, use_container_width=True, height=250)
+            else:
+                st.info("Tidak ada menu yang berhasil di-scrape untuk restoran ini.")
 
-    # ── Build & download Excel ────────────────────────────────────────────────
+    # Build & download Excel
     st.markdown("---")
     with st.spinner("📊 Membuat file Excel..."):
         excel_bytes = build_excel(results)
