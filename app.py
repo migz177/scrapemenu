@@ -98,14 +98,13 @@ def setup_driver():
     from selenium.webdriver.chrome.service import Service
 
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-gpu")
     options.add_argument("--remote-debugging-port=9222")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
@@ -189,7 +188,7 @@ def scroll_and_load_menus(driver, max_scrolls=12, progress_cb=None):
 
     while scroll_count < max_scrolls:
         driver.execute_script("window.scrollBy(0, 800);")
-        time.sleep(3)
+        time.sleep(4)
         new_height = driver.execute_script("return document.body.scrollHeight")
 
         if new_height == last_height:
@@ -230,22 +229,10 @@ def scrape_menu(driver, url, progress_cb=None):
     menu_list: list of dict {'Nama Menu', 'Deskripsi', 'Harga (Rp)', 'Harga'}
     """
     driver.get(url)
-    time.sleep(8)  # Streamlit Cloud lebih lambat, beri waktu lebih
+    time.sleep(8)
 
     # Ambil nama restoran setelah halaman pertama load
     resto_name = get_restaurant_name(driver)
-
-    # Deteksi halaman error browser (bukan halaman GrabFood)
-    ERROR_TITLES = [
-        "this page isn't working",
-        "this site can't be reached",
-        "err_",
-        "404",
-        "access denied",
-        "just a moment",  # Cloudflare
-    ]
-    if any(kw in resto_name.lower() for kw in ERROR_TITLES):
-        return resto_name, []  # Kembalikan kosong, akan ditandai gagal di UI
 
     scroll_and_load_menus(driver, max_scrolls=12, progress_cb=progress_cb)
 
@@ -397,10 +384,7 @@ def build_excel(results):
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for resto_name, url, menu_list in results:
-            if menu_list:
-                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-            else:
-                df = pd.DataFrame(columns=['Nama Menu', 'Deskripsi', 'Harga'])
+            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
             sheet_name = safe_sheet_name(resto_name, sheet_names)
             sheet_names.append(sheet_name)
             df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
@@ -537,14 +521,8 @@ def main():
                 detail_text.caption("  ↳ Membuka halaman...")
                 resto_name, menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
                 menu_list = remove_duplicates(menu_list)
-
-                if not menu_list:
-                    # Halaman error atau tidak ada menu ter-scrape
-                    failed_urls.append(url)
-                    detail_text.caption(f"  ❌ {resto_name} — Halaman gagal dimuat atau tidak ada menu ditemukan")
-                else:
-                    results.append((resto_name, url, menu_list))
-                    detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
+                results.append((resto_name, url, menu_list))
+                detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
             except Exception as e:
                 failed_urls.append(url)
                 detail_text.caption(f"  ❌ Gagal: {e}")
@@ -585,11 +563,8 @@ def main():
         with c4: st.markdown(stat_card("Tertinggi", high, small=True), unsafe_allow_html=True)
 
         with st.expander(f"📋 Preview menu {resto_name}"):
-            if menu_list:
-                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-                st.dataframe(df, use_container_width=True, height=250)
-            else:
-                st.info("Tidak ada menu yang berhasil di-scrape untuk restoran ini.")
+            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+            st.dataframe(df, use_container_width=True, height=250)
 
     # ── Build & download Excel ────────────────────────────────────────────────
     st.markdown("---")
