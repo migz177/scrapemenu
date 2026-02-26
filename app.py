@@ -94,14 +94,47 @@ st.markdown("""
 # SELENIUM: DRIVER
 # ─────────────────────────────────────────────
 def setup_driver():
+    import os
+    from selenium.webdriver.chrome.service import Service
+
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--remote-debugging-port=9222")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+
+    # ── Cari binary Chrome/Chromium (Linux untuk Streamlit Cloud) ────────────
+    CHROME_BINS = [
+        "/usr/bin/chromium-browser",       # Ubuntu (Streamlit Cloud)
+        "/usr/bin/chromium",               # beberapa distro Linux
+        "/usr/bin/google-chrome",          # Chrome di Linux
+        "/usr/bin/google-chrome-stable",
+    ]
+    for path in CHROME_BINS:
+        if os.path.exists(path):
+            options.binary_location = path
+            break
+
+    # ── Cari chromedriver (Linux untuk Streamlit Cloud) ──────────────────────
+    CHROMEDRIVER_BINS = [
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+    ]
+    service = None
+    for path in CHROMEDRIVER_BINS:
+        if os.path.exists(path):
+            service = Service(executable_path=path)
+            break
+
+    if service:
+        return webdriver.Chrome(service=service, options=options)
+    # Fallback: biarkan Selenium cari chromedriver sendiri (mode lokal)
     return webdriver.Chrome(options=options)
 
 
