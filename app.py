@@ -94,15 +94,47 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# Virtual display handle — disimpan agar tidak di-GC sebelum waktunya
+_virtual_display = None
+
+
+def start_virtual_display():
+    """Jalankan virtual display (Xvfb) di Linux agar Chrome tidak pakai --headless."""
+    global _virtual_display
+    import sys
+    if not sys.platform.startswith("linux"):
+        return  # Mac/Windows: tidak perlu
+    try:
+        from pyvirtualdisplay import Display
+        _virtual_display = Display(visible=0, size=(1920, 1080))
+        _virtual_display.start()
+    except Exception:
+        pass  # Jika Xvfb tidak tersedia, fallback ke headless
+
+
+def stop_virtual_display():
+    global _virtual_display
+    if _virtual_display:
+        try:
+            _virtual_display.stop()
+        except Exception:
+            pass
+        _virtual_display = None
 # ─────────────────────────────────────────────
 # SELENIUM: DRIVER
 # ─────────────────────────────────────────────
 def setup_driver():
     import os
+    import sys
     from selenium.webdriver.chrome.service import Service
 
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
+
+    # Gunakan --headless hanya jika tidak ada virtual display (Xvfb)
+    # Xvfb di-set sebelum setup_driver() dipanggil di Linux
+    if not sys.platform.startswith("linux") or _virtual_display is None:
+        options.add_argument("--headless")
+
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -515,6 +547,7 @@ def main():
 
     try:
         overall_text.info("🌐 Membuka browser...")
+        start_virtual_display()  # Jalankan Xvfb di Linux sebelum buka Chrome
         driver = setup_driver()
         total = len(raw_urls)
 
@@ -571,6 +604,7 @@ def main():
     finally:
         if driver:
             driver.quit()
+        stop_virtual_display()  # Matikan Xvfb jika berjalan
 
     if failed_urls:
         st.warning("⚠️ URL berikut gagal di-scrape:\n" + "\n".join(f"- {u}" for u in failed_urls))
