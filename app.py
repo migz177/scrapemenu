@@ -1,13 +1,16 @@
 """
 GrabFood Menu Scraper — Streamlit App
 ======================================
-UI sederhana: user input URL GrabFood → scrape → download Excel
+UI sederhana: user input satu atau banyak URL GrabFood → scrape → download Excel
+Fitur:
+  - Batch multi-URL (satu URL per baris)
+  - Nama restoran diambil otomatis dari halaman
+  - Output Excel: 1 sheet per restoran + sheet SUMMARY
 """
 
 import io
 import time
 import re
-import threading
 
 import streamlit as st
 import pandas as pd
@@ -34,95 +37,61 @@ st.set_page_config(
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
+
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
     .main-title {
-        text-align: center;
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #00b14f;
-        margin-bottom: 0.2rem;
+        text-align: center; font-size: 2.2rem; font-weight: 700;
+        color: #00b14f; margin-bottom: 0.2rem;
     }
-
     .sub-title {
-        text-align: center;
-        font-size: 1rem;
-        color: #555;
-        margin-bottom: 2rem;
+        text-align: center; font-size: 1rem;
+        color: #555; margin-bottom: 2rem;
     }
-
     .info-box {
-        background: #f0fdf4;
-        border-left: 4px solid #00b14f;
-        border-radius: 6px;
-        padding: 0.8rem 1.2rem;
-        margin-bottom: 1.5rem;
-        font-size: 0.9rem;
-        color: #166534;
+        background: #f0fdf4; border-left: 4px solid #00b14f;
+        border-radius: 6px; padding: 0.8rem 1.2rem;
+        margin-bottom: 1.5rem; font-size: 0.9rem; color: #166534;
     }
-
+    .resto-header {
+        background: #f8f9fa; border-radius: 8px;
+        padding: 0.6rem 1rem; margin: 1rem 0 0.4rem 0;
+        font-weight: 600; font-size: 1rem; color: #111;
+        border-left: 4px solid #00b14f;
+    }
     .stat-card {
-        background: #f8f9fa;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        text-align: center;
+        background: #f8f9fa; border-radius: 10px;
+        padding: 1rem 1.2rem; text-align: center;
         border: 1px solid #e9ecef;
     }
-
     .stat-card .label {
-        font-size: 0.78rem;
-        color: #888;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        font-size: 0.75rem; color: #888; font-weight: 500;
+        text-transform: uppercase; letter-spacing: 0.05em;
     }
-
     .stat-card .value {
-        font-size: 1.4rem;
-        font-weight: 700;
-        color: #00b14f;
-        margin-top: 0.2rem;
+        font-size: 1.3rem; font-weight: 700;
+        color: #00b14f; margin-top: 0.2rem;
     }
 
     div[data-testid="stButton"] > button {
-        background: #00b14f;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.6rem 2rem;
-        font-size: 1rem;
-        font-weight: 600;
-        width: 100%;
-        transition: background 0.2s;
+        background: #00b14f; color: white; border: none;
+        border-radius: 8px; padding: 0.6rem 2rem;
+        font-size: 1rem; font-weight: 600; width: 100%;
     }
-
-    div[data-testid="stButton"] > button:hover {
-        background: #009942;
-    }
+    div[data-testid="stButton"] > button:hover { background: #009942; }
 
     div[data-testid="stDownloadButton"] > button {
-        background: #1d4ed8;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.6rem 2rem;
-        font-size: 1rem;
-        font-weight: 600;
-        width: 100%;
+        background: #1d4ed8; color: white; border: none;
+        border-radius: 8px; padding: 0.6rem 2rem;
+        font-size: 1rem; font-weight: 600; width: 100%;
     }
-
-    div[data-testid="stDownloadButton"] > button:hover {
-        background: #1e40af;
-    }
+    div[data-testid="stDownloadButton"] > button:hover { background: #1e40af; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
-# SELENIUM HELPERS
+# SELENIUM: DRIVER
 # ─────────────────────────────────────────────
 def setup_driver():
     options = webdriver.ChromeOptions()
@@ -136,7 +105,50 @@ def setup_driver():
     return webdriver.Chrome(options=options)
 
 
-def scroll_and_load_menus(driver, max_scrolls=10, progress_cb=None):
+# ─────────────────────────────────────────────
+# SELENIUM: AMBIL NAMA RESTORAN
+# ─────────────────────────────────────────────
+def get_restaurant_name(driver):
+    """
+    Coba ambil nama restoran dari elemen heading,
+    fallback ke <title> halaman.
+    """
+    selectors = [
+        '[class*="restaurantName"]',
+        '[class*="headerName"]',
+        '[class*="restaurant-name"]',
+        'h1',
+    ]
+    for sel in selectors:
+        try:
+            elem = driver.find_element(By.CSS_SELECTOR, sel)
+            name = elem.text.strip()
+            if name:
+                return name
+        except Exception:
+            continue
+
+    # Fallback: title tag  →  "Nama Restoran | GrabFood"
+    try:
+        title = driver.title
+        if "|" in title:
+            name = title.split("|")[0].strip()
+        elif "-" in title:
+            name = title.split("-")[0].strip()
+        else:
+            name = title.strip()
+        if name:
+            return name
+    except Exception:
+        pass
+
+    return "Restoran"
+
+
+# ─────────────────────────────────────────────
+# SELENIUM: SCROLL
+# ─────────────────────────────────────────────
+def scroll_and_load_menus(driver, max_scrolls=12, progress_cb=None):
     last_height = driver.execute_script("return document.body.scrollHeight")
     scroll_count = 0
     no_change_count = 0
@@ -144,7 +156,6 @@ def scroll_and_load_menus(driver, max_scrolls=10, progress_cb=None):
     while scroll_count < max_scrolls:
         driver.execute_script("window.scrollBy(0, 800);")
         time.sleep(3)
-
         new_height = driver.execute_script("return document.body.scrollHeight")
 
         if new_height == last_height:
@@ -156,7 +167,6 @@ def scroll_and_load_menus(driver, max_scrolls=10, progress_cb=None):
 
         last_height = new_height
         scroll_count += 1
-
         if progress_cb:
             progress_cb(scroll_count, max_scrolls)
 
@@ -164,28 +174,42 @@ def scroll_and_load_menus(driver, max_scrolls=10, progress_cb=None):
     time.sleep(2)
 
 
+# ─────────────────────────────────────────────
+# SELENIUM: EXTRACT HARGA
+# ─────────────────────────────────────────────
 def extract_price(price_text):
     if not price_text:
         return None
-    price_digits = re.sub(r'[^\d]', '', price_text)
+    digits = re.sub(r'[^\d]', '', price_text)
     try:
-        return int(price_digits) if price_digits else None
+        return int(digits) if digits else None
     except Exception:
         return None
 
 
+# ─────────────────────────────────────────────
+# SELENIUM: SCRAPE MENU
+# ─────────────────────────────────────────────
 def scrape_menu(driver, url, progress_cb=None):
+    """
+    Returns (resto_name, menu_list)
+    menu_list: list of dict {'Nama Menu', 'Deskripsi', 'Harga (Rp)', 'Harga'}
+    """
     driver.get(url)
     time.sleep(4)
 
+    # Ambil nama restoran setelah halaman pertama load
+    resto_name = get_restaurant_name(driver)
+
     scroll_and_load_menus(driver, max_scrolls=12, progress_cb=progress_cb)
 
+    # Coba selector utama, fallback ke ant-row
     menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row[class*="menuItem"]')
     if not menu_items:
         menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row')
 
     if not menu_items:
-        return []
+        return resto_name, []
 
     hasil = []
     for item in menu_items:
@@ -193,57 +217,51 @@ def scrape_menu(driver, url, progress_cb=None):
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
             time.sleep(0.05)
 
-            # Nama menu
+            # ── Nama menu ──────────────────────────────
             menu_name = ''
             try:
-                name_elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameTitle"]')
-                menu_name = name_elem.text.strip()
+                elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameTitle"]')
+                menu_name = elem.text.strip()
             except Exception:
                 try:
-                    name_elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
-                    menu_name = name_elem.text.split('\n')[0].strip()
+                    elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
+                    menu_name = elem.text.split('\n')[0].strip()
                 except Exception:
-                    full_text = item.text
-                    if full_text:
-                        menu_name = full_text.split('\n')[0].strip()
-
+                    ft = item.text
+                    if ft:
+                        menu_name = ft.split('\n')[0].strip()
             if not menu_name:
                 continue
 
-            # Deskripsi
+            # ── Deskripsi ──────────────────────────────
             description = ''
             try:
-                desc_elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
-                desc_lines = desc_elem.text.split('\n')
-                if len(desc_lines) > 1:
-                    description = ' '.join(desc_lines[1:]).strip()
+                elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
+                lines = elem.text.split('\n')
+                if len(lines) > 1:
+                    description = ' '.join(lines[1:]).strip()
             except Exception:
-                full_text = item.text
-                lines = [l for l in full_text.split('\n') if l.strip()]
+                ft = item.text
+                lines = [l for l in ft.split('\n') if l.strip()]
                 if len(lines) > 1:
                     description = ' '.join(lines[1:]).strip()
             description = description[:200]
 
-            # Harga
+            # ── Harga ──────────────────────────────────
             price = None
-            price_text = ''
             try:
-                discount_elem = item.find_element(By.CSS_SELECTOR, '[class*="discountedPrice"]')
-                price_text = discount_elem.text.strip()
-                price = extract_price(price_text)
+                elem = item.find_element(By.CSS_SELECTOR, '[class*="discountedPrice"]')
+                price = extract_price(elem.text.strip())
             except Exception:
                 try:
-                    price_elem = item.find_element(By.CSS_SELECTOR, '[class*="itemPrice"]')
-                    price_text = price_elem.text.strip()
-                    price = extract_price(price_text)
+                    elem = item.find_element(By.CSS_SELECTOR, '[class*="itemPrice"]')
+                    price = extract_price(elem.text.strip())
                 except Exception:
-                    full_text = item.text
-                    for line in full_text.split('\n'):
+                    for line in item.text.split('\n'):
                         if re.search(r'\d', line):
-                            potential_price = extract_price(line)
-                            if potential_price and potential_price > 1000:
-                                price = potential_price
-                                price_text = line
+                            p = extract_price(line)
+                            if p and p > 1000:
+                                price = p
                                 break
 
             hasil.append({
@@ -252,13 +270,15 @@ def scrape_menu(driver, url, progress_cb=None):
                 'Harga (Rp)': price,
                 'Harga': f"Rp {price:,}" if price else 'N/A',
             })
-
         except Exception:
             continue
 
-    return hasil
+    return resto_name, hasil
 
 
+# ─────────────────────────────────────────────
+# HAPUS DUPLIKAT
+# ─────────────────────────────────────────────
 def remove_duplicates(menu_list):
     seen = set()
     unique = []
@@ -271,11 +291,12 @@ def remove_duplicates(menu_list):
 
 
 # ─────────────────────────────────────────────
-# EXCEL BUILDER
+# EXCEL BUILDER (multi-sheet)
 # ─────────────────────────────────────────────
 THIN = Side(style="thin", color="000000")
 BLACK_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 GREEN_FILL = PatternFill("solid", fgColor="00b14f")
+GRAY_FILL = PatternFill("solid", fgColor="D9D9D9")
 
 
 def auto_fit_columns(ws):
@@ -298,34 +319,86 @@ def apply_borders(ws):
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
 
-def style_header(ws, header_row=1):
+def style_header(ws, header_row=1, fill=GREEN_FILL):
     for cell in ws[header_row]:
         cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = GREEN_FILL
+        cell.fill = fill
 
 
-def build_excel(menu_list, url):
-    """Build in-memory Excel file and return bytes."""
-    df = pd.DataFrame(menu_list)
-    df = df[['Nama Menu', 'Deskripsi', 'Harga']]
+def safe_sheet_name(name, existing_names):
+    """Buat nama sheet yang valid (<= 31 karakter, tidak duplikat)."""
+    name = re.sub(r'[\\/*?:\[\]]', '', name)[:31]
+    if not name:
+        name = "Sheet"
+    base = name
+    counter = 1
+    while name in existing_names:
+        suffix = f"_{counter}"
+        name = base[:31 - len(suffix)] + suffix
+        counter += 1
+    return name
 
+
+def build_excel(results):
+    """
+    results: list of (resto_name, url, menu_list)
+    Returns bytes dari file Excel.
+    """
     output = io.BytesIO()
+
+    summary_rows = []
+    sheet_names = []
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Menu", index=False, startrow=2)
+        for resto_name, url, menu_list in results:
+            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+            sheet_name = safe_sheet_name(resto_name, sheet_names)
+            sheet_names.append(sheet_name)
+            df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
+
+            prices = [m['Harga (Rp)'] for m in menu_list if m['Harga (Rp)']]
+            summary_rows.append({
+                'Restoran': resto_name,
+                'URL': url,
+                'Total Menu': len(menu_list),
+                'Rata-rata Harga': f"Rp {sum(prices)//len(prices):,}" if prices else 'N/A',
+                'Harga Terendah': f"Rp {min(prices):,}" if prices else 'N/A',
+                'Harga Tertinggi': f"Rp {max(prices):,}" if prices else 'N/A',
+            })
+
+        # Sheet SUMMARY
+        df_summary = pd.DataFrame(summary_rows)
+        df_summary.to_excel(writer, sheet_name="SUMMARY", index=False)
 
     output.seek(0)
     wb = load_workbook(output)
-    ws = wb["Menu"]
 
-    # URL info di baris 1
-    ws["A1"] = "URL"
-    ws["B1"] = url
-    ws["A1"].font = Font(bold=True)
+    # ── Styling per sheet restoran ────────────────────────────────────────────
+    for i, (resto_name, url, menu_list) in enumerate(results):
+        sheet_name = sheet_names[i]
+        ws = wb[sheet_name]
 
-    apply_borders(ws)
-    style_header(ws, header_row=3)
-    auto_fit_columns(ws)
-    ws.freeze_panes = "A4"
+        ws["A1"] = "URL"
+        ws["B1"] = url
+        ws["A1"].font = Font(bold=True)
+
+        apply_borders(ws)
+        style_header(ws, header_row=3)            # baris 3 = header df (startrow=2)
+        auto_fit_columns(ws)
+        ws.freeze_panes = "A4"
+
+    # ── Styling SUMMARY ───────────────────────────────────────────────────────
+    ws_sum = wb["SUMMARY"]
+    apply_borders(ws_sum)
+    style_header(ws_sum, header_row=1, fill=GRAY_FILL)
+    # Override font color ke hitam untuk header abu-abu
+    for cell in ws_sum[1]:
+        cell.font = Font(bold=True, color="000000")
+    auto_fit_columns(ws_sum)
+    ws_sum.freeze_panes = "A2"
+
+    # Pindahkan SUMMARY ke posisi pertama
+    wb.move_sheet("SUMMARY", offset=-len(wb.sheetnames) + 1)
 
     final = io.BytesIO()
     wb.save(final)
@@ -334,133 +407,147 @@ def build_excel(menu_list, url):
 
 
 # ─────────────────────────────────────────────
+# STAT CARD HTML
+# ─────────────────────────────────────────────
+def stat_card(label, value, small=False):
+    font_size = "0.95rem" if small else "1.3rem"
+    return f"""
+    <div class="stat-card">
+        <div class="label">{label}</div>
+        <div class="value" style="font-size:{font_size}">{value}</div>
+    </div>"""
+
+
+# ─────────────────────────────────────────────
 # MAIN UI
 # ─────────────────────────────────────────────
 def main():
-    st.markdown('<div class="main-title">GrabFood Menu Scraper</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">Masukkan link restoran GrabFood dan dapatkan daftar menu dalam format Excel</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">🍔 GrabFood Menu Scraper</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sub-title">Masukkan satu atau beberapa link restoran GrabFood '
+        'dan dapatkan daftar menu dalam format Excel</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown("""
     <div class="info-box">
-        <strong>Cara pakai:</strong> Tempel link restoran GrabFood (contoh: <code>https://food.grab.com/id/id/restaurant/...</code>),
-        lalu klik <strong>Mulai Scraping</strong>. Proses biasanya memakan waktu 1–3 menit tergantung jumlah menu.
+        📌 <strong>Cara pakai:</strong> Tempel satu atau beberapa URL GrabFood (satu URL per baris),
+        lalu klik <strong>Mulai Scraping</strong>.<br>
+        ⏱️ Setiap restoran membutuhkan sekitar 1–3 menit tergantung jumlah menu.
     </div>
     """, unsafe_allow_html=True)
 
-    url_input = st.text_input(
-        "🔗 Link Restoran GrabFood",
-        placeholder="https://food.grab.com/id/id/restaurant/...",
-        label_visibility="visible",
+    urls_input = st.text_area(
+        "🔗 Link Restoran GrabFood (satu URL per baris)",
+        placeholder="https://food.grab.com/id/id/restaurant/...\nhttps://food.grab.com/id/id/restaurant/...",
+        height=130,
     )
 
     col_btn, _ = st.columns([1, 2])
     with col_btn:
         run_btn = st.button("🚀 Mulai Scraping")
 
-    if run_btn:
-        url = url_input.strip()
+    if not run_btn:
+        return
 
-        if not url:
-            st.error("⚠️ URL tidak boleh kosong.")
-            return
+    # ── Validasi input ────────────────────────────────────────────────────────
+    raw_urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
+    if not raw_urls:
+        st.error("⚠️ Masukkan minimal satu URL.")
+        return
 
-        if "grab.com" not in url:
-            st.warning("⚠️ URL yang dimasukkan bukan URL GrabFood. Pastikan URL sudah benar.")
+    invalid = [u for u in raw_urls if "grab.com" not in u]
+    if invalid:
+        st.warning(f"⚠️ URL berikut mungkin bukan URL GrabFood: {', '.join(invalid)}")
 
-        # Status placeholders
-        status_text = st.empty()
-        progress_bar = st.progress(0)
+    # ── Progress containers ───────────────────────────────────────────────────
+    overall_text = st.empty()
+    overall_bar = st.progress(0)
+    detail_text = st.empty()
 
-        def scroll_progress(current, total):
-            pct = int((current / total) * 60) + 20   # 20–80%
-            progress_bar.progress(min(pct, 80))
-            status_text.info(f"⏳ Memuat halaman... (scroll {current}/{total})")
+    results = []          # list of (resto_name, url, menu_list)
+    failed_urls = []
 
-        status_text.info("🌐 Membuka halaman GrabFood...")
-        progress_bar.progress(5)
+    driver = None
+    try:
+        overall_text.info("🌐 Membuka browser...")
+        driver = setup_driver()
+        total = len(raw_urls)
 
-        driver = None
-        try:
-            driver = setup_driver()
+        for idx, url in enumerate(raw_urls):
+            overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
+            overall_bar.progress(int(idx / total * 100))
 
-            progress_bar.progress(10)
-            status_text.info("🔄 Sedang scroll dan memuat semua menu...")
+            def scroll_progress(cur, mx, _idx=idx, _total=total):
+                inner_pct = int((cur / mx) * 80)
+                outer_pct = int((_idx / _total * 100) + (inner_pct / _total))
+                overall_bar.progress(min(outer_pct, 99))
+                detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
 
-            menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
+            try:
+                detail_text.caption("  ↳ Membuka halaman...")
+                resto_name, menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
+                menu_list = remove_duplicates(menu_list)
+                results.append((resto_name, url, menu_list))
+                detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
+            except Exception as e:
+                failed_urls.append(url)
+                detail_text.caption(f"  ❌ Gagal: {e}")
 
-            progress_bar.progress(85)
-            status_text.info("🧹 Menghapus duplikat...")
+        overall_bar.progress(100)
+        overall_text.success(f"✅ Selesai! {len(results)}/{total} restoran berhasil di-scrape.")
 
-            menu_list = remove_duplicates(menu_list)
+    except Exception as e:
+        st.error(f"❌ Error saat membuka browser: {e}")
+        return
+    finally:
+        if driver:
+            driver.quit()
 
-            progress_bar.progress(90)
+    if failed_urls:
+        st.warning("⚠️ URL berikut gagal di-scrape:\n" + "\n".join(f"- {u}" for u in failed_urls))
 
-            if not menu_list:
-                st.error("❌ Tidak ada menu yang berhasil di-scrape. Coba periksa URL atau coba lagi.")
-                return
+    if not results:
+        st.error("❌ Tidak ada data yang berhasil di-scrape.")
+        return
 
-            # Build Excel
-            status_text.info("📊 Membuat file Excel...")
-            excel_bytes = build_excel(menu_list, url)
-            progress_bar.progress(100)
+    # ── Ringkasan per restoran ────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📊 Hasil Scraping")
 
-            status_text.success(f"✅ Berhasil! Ditemukan **{len(menu_list)} item menu**.")
+    for resto_name, url, menu_list in results:
+        st.markdown(f'<div class="resto-header">🏪 {resto_name}</div>', unsafe_allow_html=True)
 
-            # ── Statistics ───────────────────────────────
-            st.markdown("---")
-            prices = [m['Harga (Rp)'] for m in menu_list if m['Harga (Rp)']]
+        prices = [m['Harga (Rp)'] for m in menu_list if m['Harga (Rp)']]
+        avg = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
+        low = f"Rp {min(prices):,}" if prices else "N/A"
+        high = f"Rp {max(prices):,}" if prices else "N/A"
 
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="label">Total Menu</div>
-                    <div class="value">{len(menu_list)}</div>
-                </div>""", unsafe_allow_html=True)
-            with col2:
-                avg = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="label">Rata-rata Harga</div>
-                    <div class="value" style="font-size:1rem">{avg}</div>
-                </div>""", unsafe_allow_html=True)
-            with col3:
-                low = f"Rp {min(prices):,}" if prices else "N/A"
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="label">Harga Terendah</div>
-                    <div class="value" style="font-size:1rem">{low}</div>
-                </div>""", unsafe_allow_html=True)
-            with col4:
-                high = f"Rp {max(prices):,}" if prices else "N/A"
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="label">Harga Tertinggi</div>
-                    <div class="value" style="font-size:1rem">{high}</div>
-                </div>""", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.markdown(stat_card("Total Menu", len(menu_list)), unsafe_allow_html=True)
+        with c2: st.markdown(stat_card("Rata-rata", avg, small=True), unsafe_allow_html=True)
+        with c3: st.markdown(stat_card("Terendah", low, small=True), unsafe_allow_html=True)
+        with c4: st.markdown(stat_card("Tertinggi", high, small=True), unsafe_allow_html=True)
 
-            st.markdown("")
+        with st.expander(f"📋 Preview menu {resto_name}"):
+            df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
+            st.dataframe(df, use_container_width=True, height=250)
 
-            # ── Preview table ────────────────────────────
-            st.subheader("📋 Preview Menu")
-            df_preview = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-            st.dataframe(df_preview, use_container_width=True, height=300)
+    # ── Build & download Excel ────────────────────────────────────────────────
+    st.markdown("---")
+    with st.spinner("📊 Membuat file Excel..."):
+        excel_bytes = build_excel(results)
 
-            # ── Download button ───────────────────────────
-            st.markdown("")
-            st.download_button(
-                label="⬇️ Download Excel",
-                data=excel_bytes,
-                file_name="grabfood_menu.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+    n = len(results)
+    filename = "grabfood_menu.xlsx" if n == 1 else f"grabfood_menu_{n}_resto.xlsx"
 
-        except Exception as e:
-            st.error(f"❌ Terjadi error: {e}")
-        finally:
-            if driver:
-                driver.quit()
+    st.download_button(
+        label=f"⬇️ Download Excel ({n} restoran)",
+        data=excel_bytes,
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 
 if __name__ == "__main__":
