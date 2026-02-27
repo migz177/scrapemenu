@@ -263,7 +263,27 @@ def scrape_menu(driver, url, progress_cb=None):
     """
     driver.get(url)
 
-    # Tunggu sampai konten halaman ter-render (lebih reliable dari sleep statis)
+    # Deteksi lebih awal jika Chrome gagal load halaman (error page / timeout)
+    ERROR_PAGE_TITLES = [
+        "this page isn't working",
+        "this site can't be reached",
+        "err_",
+        "access denied",
+        "just a moment",   # Cloudflare challenge
+        "404",
+    ]
+    try:
+        # Tunggu minimal ada <body> dulu sebelum deteksi
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        page_title = driver.title.lower()
+        if any(kw in page_title for kw in ERROR_PAGE_TITLES):
+            return "Error: " + driver.title, []
+    except Exception:
+        pass
+
+    # Tunggu sampai konten menu GrabFood ter-render
     try:
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'div.ant-row'))
@@ -289,7 +309,7 @@ def scrape_menu(driver, url, progress_cb=None):
     for item in menu_items:
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
-            time.sleep(0.05)
+            time.sleep(0.1)
 
             # ── Nama menu ──────────────────────────────────────────────
             menu_name = ''
@@ -543,14 +563,12 @@ def main():
 
     results = []       # list of (resto_name, url, menu_list)
     failed_urls = []
-    driver = None
+    total = len(raw_urls)
+
+    overall_text.info("🌐 Mempersiapkan browser...")
+    start_virtual_display()  # Jalankan Xvfb sekali di awal (Linux/Streamlit Cloud)
 
     try:
-        overall_text.info("🌐 Membuka browser...")
-        start_virtual_display()  # Jalankan Xvfb di Linux sebelum buka Chrome
-        driver = setup_driver()
-        total = len(raw_urls)
-
         for idx, url in enumerate(raw_urls):
             overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
             overall_bar.progress(int(idx / total * 100))
@@ -561,8 +579,11 @@ def main():
                 overall_bar.progress(min(outer_pct, 99))
                 detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
 
+            # Buka Chrome BARU untuk setiap restoran → RAM selalu bersih
+            driver = None
             try:
-                detail_text.caption("  ↳ Membuka halaman...")
+                detail_text.caption("  ↳ Membuka browser...")
+                driver = setup_driver()
 
                 # Retry otomatis maksimal 3x jika dapat 0 item
                 MAX_RETRY = 3
@@ -594,17 +615,25 @@ def main():
             except Exception as e:
                 failed_urls.append(url)
                 detail_text.caption(f"  ❌ Gagal: {e}")
+            finally:
+                # Tutup Chrome & bebaskan RAM sebelum pindah ke restoran berikutnya
+                if driver:
+                    driver.quit()
+                if idx < total - 1:
+                    # Jeda lebih lama agar GrabFood tidak rate-limit IP kita
+                    wait_sec = random.randint(15, 25)
+                    detail_text.caption(f"  ⏳ Menunggu {wait_sec} detik sebelum restoran berikutnya...")
+                    time.sleep(wait_sec)
 
         overall_bar.progress(100)
         overall_text.success(f"✅ Selesai! {len(results)}/{total} restoran berhasil di-scrape.")
 
     except Exception as e:
-        st.error(f"❌ Error saat membuka browser: {e}")
+        st.error(f"❌ Error tidak terduga: {e}")
         return
     finally:
-        if driver:
-            driver.quit()
-        stop_virtual_display()  # Matikan Xvfb jika berjalan
+        stop_virtual_display()  # Matikan Xvfb setelah semua selesai
+
 
     if failed_urls:
         st.warning("⚠️ URL berikut gagal di-scrape:\n" + "\n".join(f"- {u}" for u in failed_urls))
