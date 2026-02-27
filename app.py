@@ -22,6 +22,27 @@ from playwright.sync_api import sync_playwright
 
 
 # ─────────────────────────────────────────────
+# AUTO-INSTALL PLAYWRIGHT BROWSER (untuk Streamlit Cloud)
+# ─────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def install_playwright_browsers():
+    """
+    Download Chromium binary Playwright secara otomatis.
+    Hanya berjalan sekali per sesi server (di-cache oleh Streamlit).
+    Penting untuk Streamlit Cloud karena tidak bisa jalankan CLI manual.
+    """
+    import subprocess, sys
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=True,
+        capture_output=True,
+    )
+
+install_playwright_browsers()
+
+
+
+# ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
