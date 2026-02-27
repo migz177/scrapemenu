@@ -11,7 +11,6 @@ Fitur:
 import io
 import time
 import re
-import random
 
 import streamlit as st
 import pandas as pd
@@ -19,10 +18,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from playwright.sync_api import sync_playwright
 
 
 # ─────────────────────────────────────────────
@@ -33,7 +29,6 @@ st.set_page_config(
     page_icon="🍔",
     layout="centered",
 )
-
 
 # ─────────────────────────────────────────────
 # CUSTOM CSS
@@ -94,91 +89,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# Virtual display handle — disimpan agar tidak di-GC sebelum waktunya
-_virtual_display = None
-
-
-def start_virtual_display():
-    """Jalankan virtual display (Xvfb) di Linux agar Chrome tidak pakai --headless."""
-    global _virtual_display
-    import sys
-    if not sys.platform.startswith("linux"):
-        return  # Mac/Windows: tidak perlu
-    try:
-        from pyvirtualdisplay import Display
-        _virtual_display = Display(visible=0, size=(1920, 1080))
-        _virtual_display.start()
-    except Exception:
-        pass  # Jika Xvfb tidak tersedia, fallback ke headless
-
-
-def stop_virtual_display():
-    global _virtual_display
-    if _virtual_display:
-        try:
-            _virtual_display.stop()
-        except Exception:
-            pass
-        _virtual_display = None
 # ─────────────────────────────────────────────
-# SELENIUM: DRIVER
+# PLAYWRIGHT: AMBIL NAMA RESTORAN
 # ─────────────────────────────────────────────
-def setup_driver():
-    import os
-    import sys
-    from selenium.webdriver.chrome.service import Service
-
-    options = webdriver.ChromeOptions()
-
-    # Gunakan --headless hanya jika tidak ada virtual display (Xvfb)
-    # Xvfb di-set sebelum setup_driver() dipanggil di Linux
-    if not sys.platform.startswith("linux") or _virtual_display is None:
-        options.add_argument("--headless")
-
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-
-    # Cari binary Chrome/Chromium (Linux untuk Streamlit Cloud)
-    CHROME_BINS = [
-        "/usr/bin/chromium-browser",       # Ubuntu
-        "/usr/bin/chromium",               # Debian Bookworm (Streamlit Cloud)
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-    ]
-    for path in CHROME_BINS:
-        if os.path.exists(path):
-            options.binary_location = path
-            break
-
-    # Cari chromedriver (Linux untuk Streamlit Cloud)
-    CHROMEDRIVER_BINS = [
-        "/usr/bin/chromedriver",
-        "/usr/lib/chromium-browser/chromedriver",
-        "/usr/lib/chromium/chromedriver",
-    ]
-    service = None
-    for path in CHROMEDRIVER_BINS:
-        if os.path.exists(path):
-            service = Service(executable_path=path)
-            break
-
-    if service:
-        return webdriver.Chrome(service=service, options=options)
-    # Fallback: biarkan Selenium cari chromedriver sendiri (mode lokal)
-    return webdriver.Chrome(options=options)
-
-
-# ─────────────────────────────────────────────
-# SELENIUM: AMBIL NAMA RESTORAN
-# ─────────────────────────────────────────────
-def get_restaurant_name(driver):
-    """Ambil nama restoran dari elemen heading, fallback ke <title>."""
+def get_restaurant_name(page):
+    """
+    Coba ambil nama restoran dari elemen heading,
+    fallback ke <title> halaman.
+    """
     selectors = [
         '[class*="restaurantName"]',
         '[class*="headerName"]',
@@ -187,16 +105,17 @@ def get_restaurant_name(driver):
     ]
     for sel in selectors:
         try:
-            elem = driver.find_element(By.CSS_SELECTOR, sel)
-            name = elem.text.strip()
-            if name:
-                return name
+            elem = page.query_selector(sel)
+            if elem:
+                name = elem.text_content().strip()
+                if name:
+                    return name
         except Exception:
             continue
 
-    # Fallback: title tag → "Nama Restoran | GrabFood"
+    # Fallback: title tag  →  "Nama Restoran | GrabFood"
     try:
-        title = driver.title
+        title = page.title()
         if "|" in title:
             name = title.split("|")[0].strip()
         elif "-" in title:
@@ -212,17 +131,17 @@ def get_restaurant_name(driver):
 
 
 # ─────────────────────────────────────────────
-# SELENIUM: SCROLL
+# PLAYWRIGHT: SCROLL
 # ─────────────────────────────────────────────
-def scroll_and_load_menus(driver, max_scrolls=12, progress_cb=None):
-    last_height = driver.execute_script("return document.body.scrollHeight")
+def scroll_and_load_menus(page, max_scrolls=12, progress_cb=None):
+    last_height = page.evaluate("document.body.scrollHeight")
     scroll_count = 0
     no_change_count = 0
 
     while scroll_count < max_scrolls:
-        driver.execute_script("window.scrollBy(0, 800);")
-        time.sleep(4)
-        new_height = driver.execute_script("return document.body.scrollHeight")
+        page.evaluate("window.scrollBy(0, 800)")
+        page.wait_for_timeout(4000)
+        new_height = page.evaluate("document.body.scrollHeight")
 
         if new_height == last_height:
             no_change_count += 1
@@ -236,8 +155,8 @@ def scroll_and_load_menus(driver, max_scrolls=12, progress_cb=None):
         if progress_cb:
             progress_cb(scroll_count, max_scrolls)
 
-    driver.execute_script("window.scrollTo(0, 0);")
-    time.sleep(2)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(2000)
 
 
 # ─────────────────────────────────────────────
@@ -254,53 +173,25 @@ def extract_price(price_text):
 
 
 # ─────────────────────────────────────────────
-# SELENIUM: SCRAPE MENU
+# PLAYWRIGHT: SCRAPE MENU
 # ─────────────────────────────────────────────
-def scrape_menu(driver, url, progress_cb=None):
+def scrape_menu(page, url, progress_cb=None):
     """
     Returns (resto_name, menu_list)
     menu_list: list of dict {'Nama Menu', 'Deskripsi', 'Harga (Rp)', 'Harga'}
     """
-    driver.get(url)
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(8000)
 
-    # Deteksi lebih awal jika Chrome gagal load halaman (error page / timeout)
-    ERROR_PAGE_TITLES = [
-        "this page isn't working",
-        "this site can't be reached",
-        "err_",
-        "access denied",
-        "just a moment",   # Cloudflare challenge
-        "404",
-    ]
-    try:
-        # Tunggu minimal ada <body> dulu sebelum deteksi
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.TAG_NAME, 'body'))
-        )
-        page_title = driver.title.lower()
-        if any(kw in page_title for kw in ERROR_PAGE_TITLES):
-            return "Error: " + driver.title, []
-    except Exception:
-        pass
+    # Ambil nama restoran setelah halaman pertama load
+    resto_name = get_restaurant_name(page)
 
-    # Tunggu sampai konten menu GrabFood ter-render
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'div.ant-row'))
-        )
-    except Exception:
-        # Jika timeout, tetap lanjut — mungkin selector berubah
-        time.sleep(8)
+    scroll_and_load_menus(page, max_scrolls=12, progress_cb=progress_cb)
 
-    # Ambil nama restoran setelah halaman load
-    resto_name = get_restaurant_name(driver)
-
-    scroll_and_load_menus(driver, max_scrolls=12, progress_cb=progress_cb)
-
-    # Coba selector utama, fallback ke ant-row generik
-    menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row[class*="menuItem"]')
+    # Coba selector utama, fallback ke ant-row
+    menu_items = page.query_selector_all('div.ant-row[class*="menuItem"]')
     if not menu_items:
-        menu_items = driver.find_elements(By.CSS_SELECTOR, 'div.ant-row')
+        menu_items = page.query_selector_all('div.ant-row')
 
     if not menu_items:
         return resto_name, []
@@ -308,56 +199,54 @@ def scrape_menu(driver, url, progress_cb=None):
     hasil = []
     for item in menu_items:
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
-            time.sleep(0.1)
+            item.scroll_into_view_if_needed()
 
-            # ── Nama menu ──────────────────────────────────────────────
+            # ── Nama menu ──────────────────────────────
             menu_name = ''
-            try:
-                elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameTitle"]')
-                menu_name = elem.text.strip()
-            except Exception:
-                try:
-                    elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
-                    menu_name = elem.text.split('\n')[0].strip()
-                except Exception:
-                    ft = item.text
-                    if ft:
-                        menu_name = ft.split('\n')[0].strip()
-
+            elem = item.query_selector('[class*="itemNameTitle"]')
+            if elem:
+                menu_name = elem.text_content().strip()
+            if not menu_name:
+                elem = item.query_selector('[class*="itemNameDescription"]')
+                if elem:
+                    menu_name = elem.text_content().split('\n')[0].strip()
+            if not menu_name:
+                ft = item.text_content()
+                if ft:
+                    menu_name = ft.split('\n')[0].strip()
             if not menu_name:
                 continue
 
-            # ── Deskripsi ──────────────────────────────────────────────
+            # ── Deskripsi ──────────────────────────────
             description = ''
-            try:
-                elem = item.find_element(By.CSS_SELECTOR, '[class*="itemNameDescription"]')
-                lines = elem.text.split('\n')
+            elem = item.query_selector('[class*="itemNameDescription"]')
+            if elem:
+                lines = elem.text_content().split('\n')
                 if len(lines) > 1:
                     description = ' '.join(lines[1:]).strip()
-            except Exception:
-                ft = item.text
+            if not description:
+                ft = item.text_content()
                 lines = [l for l in ft.split('\n') if l.strip()]
                 if len(lines) > 1:
                     description = ' '.join(lines[1:]).strip()
             description = description[:200]
 
-            # ── Harga ──────────────────────────────────────────────────
+            # ── Harga ──────────────────────────────────
             price = None
-            try:
-                elem = item.find_element(By.CSS_SELECTOR, '[class*="discountedPrice"]')
-                price = extract_price(elem.text.strip())
-            except Exception:
-                try:
-                    elem = item.find_element(By.CSS_SELECTOR, '[class*="itemPrice"]')
-                    price = extract_price(elem.text.strip())
-                except Exception:
-                    for line in item.text.split('\n'):
-                        if re.search(r'\d', line):
-                            p = extract_price(line)
-                            if p and p > 1000:
-                                price = p
-                                break
+            elem = item.query_selector('[class*="discountedPrice"]')
+            if elem:
+                price = extract_price(elem.text_content().strip())
+            if not price:
+                elem = item.query_selector('[class*="itemPrice"]')
+                if elem:
+                    price = extract_price(elem.text_content().strip())
+            if not price:
+                for line in item.text_content().split('\n'):
+                    if re.search(r'\d', line):
+                        p = extract_price(line)
+                        if p and p > 1000:
+                            price = p
+                            break
 
             hasil.append({
                 'Nama Menu': menu_name,
@@ -365,7 +254,6 @@ def scrape_menu(driver, url, progress_cb=None):
                 'Harga (Rp)': price,
                 'Harga': f"Rp {price:,}" if price else 'N/A',
             })
-
         except Exception:
             continue
 
@@ -437,22 +325,18 @@ def safe_sheet_name(name, existing_names):
 
 def build_excel(results):
     """
-    Bangun file Excel multi-sheet dari hasil scraping.
     results: list of (resto_name, url, menu_list)
-    Returns: bytes file Excel
+    Returns bytes dari file Excel.
     """
     output = io.BytesIO()
+
     summary_rows = []
     sheet_names = []
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for resto_name, url, menu_list in results:
-            # Guard: jika list kosong, buat DataFrame kosong dengan kolom yang benar
-            if menu_list:
-                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-            else:
-                df = pd.DataFrame(columns=['Nama Menu', 'Deskripsi', 'Harga'])
-
+            _cols = ['Nama Menu', 'Deskripsi', 'Harga']
+            df = pd.DataFrame(menu_list, columns=_cols) if menu_list else pd.DataFrame(columns=_cols)
             sheet_name = safe_sheet_name(resto_name, sheet_names)
             sheet_names.append(sheet_name)
             df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
@@ -474,21 +358,25 @@ def build_excel(results):
     output.seek(0)
     wb = load_workbook(output)
 
-    # Styling per sheet restoran
-    for i, (resto_name, url, _) in enumerate(results):
-        ws = wb[sheet_names[i]]
+    # ── Styling per sheet restoran ────────────────────────────────────────────
+    for i, (resto_name, url, menu_list) in enumerate(results):
+        sheet_name = sheet_names[i]
+        ws = wb[sheet_name]
+
         ws["A1"] = "URL"
         ws["B1"] = url
         ws["A1"].font = Font(bold=True)
+
         apply_borders(ws)
-        style_header(ws, header_row=3)   # header dari pandas ada di baris 3 (startrow=2)
+        style_header(ws, header_row=3)            # baris 3 = header df (startrow=2)
         auto_fit_columns(ws)
         ws.freeze_panes = "A4"
 
-    # Styling SUMMARY
+    # ── Styling SUMMARY ───────────────────────────────────────────────────────
     ws_sum = wb["SUMMARY"]
     apply_borders(ws_sum)
     style_header(ws_sum, header_row=1, fill=GRAY_FILL)
+    # Override font color ke hitam untuk header abu-abu
     for cell in ws_sum[1]:
         cell.font = Font(bold=True, color="000000")
     auto_fit_columns(ws_sum)
@@ -523,8 +411,9 @@ def main():
     st.markdown(
         '<div class="sub-title">Masukkan satu atau beberapa link restoran GrabFood '
         'dan dapatkan daftar menu dalam format Excel</div>',
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
+
     st.markdown("""
     <div class="info-box">
         📌 <strong>Cara pakai:</strong> Tempel satu atau beberapa URL GrabFood (satu URL per baris),
@@ -546,7 +435,7 @@ def main():
     if not run_btn:
         return
 
-    # Validasi input
+    # ── Validasi input ────────────────────────────────────────────────────────
     raw_urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
     if not raw_urls:
         st.error("⚠️ Masukkan minimal satu URL.")
@@ -556,84 +445,65 @@ def main():
     if invalid:
         st.warning(f"⚠️ URL berikut mungkin bukan URL GrabFood: {', '.join(invalid)}")
 
-    # Progress containers
+    # ── Progress containers ───────────────────────────────────────────────────
     overall_text = st.empty()
     overall_bar = st.progress(0)
     detail_text = st.empty()
 
-    results = []       # list of (resto_name, url, menu_list)
+    results = []          # list of (resto_name, url, menu_list)
     failed_urls = []
-    total = len(raw_urls)
-
-    overall_text.info("🌐 Mempersiapkan browser...")
-    start_virtual_display()  # Jalankan Xvfb sekali di awal (Linux/Streamlit Cloud)
 
     try:
-        for idx, url in enumerate(raw_urls):
-            overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
-            overall_bar.progress(int(idx / total * 100))
+        overall_text.info("🌐 Membuka browser...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ]
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+                locale="id-ID",
+            )
+            page = context.new_page()
+            total = len(raw_urls)
 
-            def scroll_progress(cur, mx, _idx=idx, _total=total):
-                inner_pct = int((cur / mx) * 80)
-                outer_pct = int((_idx / _total * 100) + (inner_pct / _total))
-                overall_bar.progress(min(outer_pct, 99))
-                detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
+            for idx, url in enumerate(raw_urls):
+                overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
+                overall_bar.progress(int(idx / total * 100))
 
-            # Buka Chrome BARU untuk setiap restoran → RAM selalu bersih
-            driver = None
-            try:
-                detail_text.caption("  ↳ Membuka browser...")
-                driver = setup_driver()
+                def scroll_progress(cur, mx, _idx=idx, _total=total):
+                    inner_pct = int((cur / mx) * 80)
+                    outer_pct = int((_idx / _total * 100) + (inner_pct / _total))
+                    overall_bar.progress(min(outer_pct, 99))
+                    detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
 
-                # Retry otomatis maksimal 3x jika dapat 0 item
-                MAX_RETRY = 3
-                menu_list = []
-                for attempt in range(1, MAX_RETRY + 1):
-                    resto_name, menu_list = scrape_menu(driver, url, progress_cb=scroll_progress)
+                try:
+                    detail_text.caption("  ↳ Membuka halaman...")
+                    resto_name, menu_list = scrape_menu(page, url, progress_cb=scroll_progress)
                     menu_list = remove_duplicates(menu_list)
-
-                    if menu_list:
-                        break
-                    elif attempt < MAX_RETRY:
-                        wait_sec = random.randint(5, 10)
-                        detail_text.caption(
-                            f"  ⚠️ Percobaan {attempt}: 0 menu — "
-                            f"mencoba lagi dalam {wait_sec} detik..."
-                        )
-                        time.sleep(wait_sec)
-
-                if menu_list:
                     results.append((resto_name, url, menu_list))
                     detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
-                else:
+                except Exception as e:
                     failed_urls.append(url)
-                    detail_text.caption(
-                        f"  ❌ {resto_name} — 0 menu setelah {MAX_RETRY}x percobaan "
-                        f"(halaman mungkin terblokir)"
-                    )
+                    detail_text.caption(f"  ❌ Gagal: {e}")
 
-            except Exception as e:
-                failed_urls.append(url)
-                detail_text.caption(f"  ❌ Gagal: {e}")
-            finally:
-                # Tutup Chrome & bebaskan RAM sebelum pindah ke restoran berikutnya
-                if driver:
-                    driver.quit()
-                if idx < total - 1:
-                    # Jeda lebih lama agar GrabFood tidak rate-limit IP kita
-                    wait_sec = random.randint(15, 25)
-                    detail_text.caption(f"  ⏳ Menunggu {wait_sec} detik sebelum restoran berikutnya...")
-                    time.sleep(wait_sec)
+            browser.close()
 
         overall_bar.progress(100)
         overall_text.success(f"✅ Selesai! {len(results)}/{total} restoran berhasil di-scrape.")
 
     except Exception as e:
-        st.error(f"❌ Error tidak terduga: {e}")
+        st.error(f"❌ Error saat membuka browser: {e}")
         return
-    finally:
-        stop_virtual_display()  # Matikan Xvfb setelah semua selesai
-
 
     if failed_urls:
         st.warning("⚠️ URL berikut gagal di-scrape:\n" + "\n".join(f"- {u}" for u in failed_urls))
@@ -642,7 +512,7 @@ def main():
         st.error("❌ Tidak ada data yang berhasil di-scrape.")
         return
 
-    # Ringkasan per restoran
+    # ── Ringkasan per restoran ────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("📊 Hasil Scraping")
 
@@ -650,8 +520,8 @@ def main():
         st.markdown(f'<div class="resto-header">🏪 {resto_name}</div>', unsafe_allow_html=True)
 
         prices = [m['Harga (Rp)'] for m in menu_list if m['Harga (Rp)']]
-        avg  = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
-        low  = f"Rp {min(prices):,}" if prices else "N/A"
+        avg = f"Rp {sum(prices)//len(prices):,}" if prices else "N/A"
+        low = f"Rp {min(prices):,}" if prices else "N/A"
         high = f"Rp {max(prices):,}" if prices else "N/A"
 
         c1, c2, c3, c4 = st.columns(4)
@@ -661,13 +531,11 @@ def main():
         with c4: st.markdown(stat_card("Tertinggi", high, small=True), unsafe_allow_html=True)
 
         with st.expander(f"📋 Preview menu {resto_name}"):
-            if menu_list:
-                df = pd.DataFrame(menu_list)[['Nama Menu', 'Deskripsi', 'Harga']]
-                st.dataframe(df, use_container_width=True, height=250)
-            else:
-                st.info("Tidak ada menu yang berhasil di-scrape untuk restoran ini.")
+            _cols = ['Nama Menu', 'Deskripsi', 'Harga']
+            df = pd.DataFrame(menu_list, columns=_cols) if menu_list else pd.DataFrame(columns=_cols)
+            st.dataframe(df, use_container_width=True, height=250)
 
-    # Build & download Excel
+    # ── Build & download Excel ────────────────────────────────────────────────
     st.markdown("---")
     with st.spinner("📊 Membuat file Excel..."):
         excel_bytes = build_excel(results)
