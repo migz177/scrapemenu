@@ -201,8 +201,8 @@ def scrape_menu(page, url, progress_cb=None):
     Returns (resto_name, menu_list)
     menu_list: list of dict {'Nama Menu', 'Deskripsi', 'Harga (Rp)', 'Harga'}
     """
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(8000)
+    page.goto(url, wait_until="networkidle", timeout=60000)
+    page.wait_for_timeout(3000)
 
     # Ambil nama restoran setelah halaman pertama load
     resto_name = get_restaurant_name(page)
@@ -474,57 +474,49 @@ def main():
     results = []          # list of (resto_name, url, menu_list)
     failed_urls = []
 
-    try:
-        overall_text.info("🌐 Membuka browser...")
-        with sync_playwright() as p:
+    total = len(raw_urls)
+
+    with sync_playwright() as p:
+        for idx, url in enumerate(raw_urls):
+            overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
+            overall_bar.progress(int(idx / total * 100))
+
+            def scroll_progress(cur, mx, _idx=idx, _total=total):
+                inner_pct = int((cur / mx) * 80)
+                outer_pct = int((_idx / _total * 100) + (inner_pct / _total))
+                overall_bar.progress(min(outer_pct, 99))
+                detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
+
+            # ── Buka browser baru untuk setiap URL ──────────────────────────
+            detail_text.caption("  ↳ Membuka browser baru...")
             browser = p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ]
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1920, "height": 1080},
-                locale="id-ID",
-            )
-            page = context.new_page()
-            total = len(raw_urls)
+            try:
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1920, "height": 1080},
+                    locale="id-ID",
+                )
+                page = context.new_page()
+                detail_text.caption("  ↳ Membuka halaman...")
+                resto_name, menu_list = scrape_menu(page, url, progress_cb=scroll_progress)
+                menu_list = remove_duplicates(menu_list)
+                results.append((resto_name, url, menu_list))
+                detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
+            except Exception as e:
+                failed_urls.append(url)
+                detail_text.caption(f"  ❌ Gagal: {e}")
+            finally:
+                browser.close()  # tutup browser segera setelah URL selesai
 
-            for idx, url in enumerate(raw_urls):
-                overall_text.info(f"🔄 Scraping restoran **{idx + 1} / {total}**...")
-                overall_bar.progress(int(idx / total * 100))
-
-                def scroll_progress(cur, mx, _idx=idx, _total=total):
-                    inner_pct = int((cur / mx) * 80)
-                    outer_pct = int((_idx / _total * 100) + (inner_pct / _total))
-                    overall_bar.progress(min(outer_pct, 99))
-                    detail_text.caption(f"  ↳ Scroll {cur}/{mx} untuk memuat semua menu...")
-
-                try:
-                    detail_text.caption("  ↳ Membuka halaman...")
-                    resto_name, menu_list = scrape_menu(page, url, progress_cb=scroll_progress)
-                    menu_list = remove_duplicates(menu_list)
-                    results.append((resto_name, url, menu_list))
-                    detail_text.caption(f"  ✅ {resto_name} — {len(menu_list)} item berhasil di-scrape")
-                except Exception as e:
-                    failed_urls.append(url)
-                    detail_text.caption(f"  ❌ Gagal: {e}")
-
-            browser.close()
-
-        overall_bar.progress(100)
-        overall_text.success(f"✅ Selesai! {len(results)}/{total} restoran berhasil di-scrape.")
-
-    except Exception as e:
-        st.error(f"❌ Error saat membuka browser: {e}")
-        return
+    overall_bar.progress(100)
+    overall_text.success(f"✅ Selesai! {len(results)}/{total} restoran berhasil di-scrape.")
 
     if failed_urls:
         st.warning("⚠️ URL berikut gagal di-scrape:\n" + "\n".join(f"- {u}" for u in failed_urls))
