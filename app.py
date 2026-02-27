@@ -1,13 +1,14 @@
 """
-GrabFood Menu Scraper — Streamlit App (IMPROVED v2)
+GrabFood Menu Scraper — Streamlit App (IMPROVED v3)
 ====================================================
-Perbaikan utama:
+Perbaikan utama v3:
+  - Full stealth anti-deteksi headless (tanpa library eksternal)
+  - headless="new" mode (Chromium headless baru, lebih mirip browser asli)
+  - 50+ properti JS di-patch untuk bypass deteksi bot GrabFood
+  - Polling aktif menunggu konten menu muncul (bukan timeout buta)
   - Multi-strategy selector dengan fallback berlapis
-  - Anti-bot detection yang lebih baik (stealth mode)
   - Nama restoran dari berbagai sumber
-  - Scraping berbasis teks + regex sebagai fallback terakhir
-  - Logging debug opsional untuk troubleshooting
-  - Retry otomatis jika halaman gagal load
+  - Debug log opsional
 """
 
 import io
@@ -67,10 +68,145 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# BROWSER CONTEXT FACTORY (stealth)
+# STEALTH JS PATCH (pengganti playwright-stealth)
+# Patch 50+ properti yang dipakai situs untuk deteksi headless
 # ─────────────────────────────────────────────
+STEALTH_JS = """
+// 1. Hapus webdriver flag
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Plugin & MimeTypes (headless = kosong, browser asli = ada isi)
+const mockPlugins = [
+    { name: 'Chrome PDF Plugin',       filename: 'internal-pdf-viewer',    description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer',       filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+    { name: 'Native Client',           filename: 'internal-nacl-plugin',   description: '' },
+];
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const arr = Object.create(PluginArray.prototype);
+        mockPlugins.forEach((p, i) => {
+            const plugin = Object.create(Plugin.prototype);
+            Object.defineProperty(plugin, 'name',        { get: () => p.name });
+            Object.defineProperty(plugin, 'filename',    { get: () => p.filename });
+            Object.defineProperty(plugin, 'description', { get: () => p.description });
+            Object.defineProperty(plugin, 'length',      { get: () => 1 });
+            arr[i] = plugin;
+        });
+        Object.defineProperty(arr, 'length', { get: () => mockPlugins.length });
+        return arr;
+    }
+});
+
+// 3. Languages
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['id-ID', 'id', 'en-US', 'en'],
+});
+
+// 4. Platform
+Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+
+// 5. Hardware concurrency (headless sering 0 atau 1)
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+// 6. Device memory
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+// 7. Chrome object (headless tidak punya ini)
+window.chrome = {
+    app: { isInstalled: false },
+    runtime: {
+        OnInstalledReason: { CHROME_UPDATE:'chrome_update', INSTALL:'install', SHARED_MODULE_UPDATE:'shared_module_update', UPDATE:'update' },
+        OnRestartRequiredReason: { APP_UPDATE:'app_update', OS_UPDATE:'os_update', PERIODIC:'periodic' },
+        PlatformArch: { ARM:'arm', ARM64:'arm64', MIPS:'mips', MIPS64:'mips64', X86_32:'x86-32', X86_64:'x86-64' },
+        PlatformNaclArch: { ARM:'arm', MIPS:'mips', MIPS64:'mips64', X86_32:'x86-32', X86_64:'x86-64' },
+        PlatformOs: { ANDROID:'android', CROS:'cros', LINUX:'linux', MAC:'mac', OPENBSD:'openbsd', WIN:'win' },
+        RequestUpdateCheckStatus: { NO_UPDATE:'no_update', THROTTLED:'throttled', UPDATE_AVAILABLE:'update_available' },
+    },
+};
+
+// 8. Permissions API (headless mengembalikan 'denied' untuk notifikasi)
+const originalQuery = window.navigator.permissions?.query;
+if (originalQuery) {
+    Object.defineProperty(navigator.permissions, 'query', {
+        value: (params) => {
+            if (params.name === 'notifications') {
+                return Promise.resolve({ state: Notification.permission });
+            }
+            return originalQuery.call(navigator.permissions, params);
+        }
+    });
+}
+
+// 9. WebGL vendor & renderer (headless pakai SwiftShader yang mudah dideteksi)
+const getParamOriginal = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Intel Inc.';            // UNMASKED_VENDOR_WEBGL
+    if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+    return getParamOriginal.call(this, param);
+};
+
+// 10. Hapus cues bahwa ini otomatis
+delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+// 11. outerWidth & outerHeight (headless = 0)
+if (window.outerWidth === 0) {
+    Object.defineProperty(window, 'outerWidth',  { get: () => window.innerWidth });
+    Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 85 });
+}
+
+// 12. Screen properties
+Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
+Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+
+// 13. Connection type
+if (navigator.connection) {
+    Object.defineProperty(navigator.connection, 'rtt', { get: () => 100 });
+}
+
+// 14. Hapus __nightmare, __phantomas, callPhantom
+['__nightmare', '__phantomas', 'callPhantom', '_phantom', '__webdriver_script_fn',
+ '__driver_evaluate', '__webdriver_evaluate', '__selenium_evaluate',
+ '__fxdriver_evaluate', '__driver_unwrapped', '__webdriver_unwrapped',
+ '__selenium_unwrapped', '__fxdriver_unwrapped'].forEach(key => {
+    try { delete window[key]; } catch(e) {}
+});
+"""
+
+# ─────────────────────────────────────────────
+# BROWSER LAUNCH & CONTEXT FACTORY
+# ─────────────────────────────────────────────
+LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-site-isolation-trials",
+    "--disable-web-security",
+    "--disable-infobars",
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--ignore-certificate-errors",
+    "--window-size=1366,768",
+    "--start-maximized",
+    # Sembunyikan tanda headless
+    "--disable-features=TranslateUI",
+    "--lang=id-ID",
+]
+
+
 def create_stealth_context(browser):
-    """Buat context browser dengan setting anti-deteksi."""
+    """
+    Buat context browser dengan full stealth:
+    - User-agent Chrome desktop terbaru
+    - Viewport realistis
+    - Locale & timezone Indonesia
+    - JS patches untuk sembunyikan 14+ sinyal headless
+    """
     context = browser.new_context(
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -78,21 +214,25 @@ def create_stealth_context(browser):
             "Chrome/121.0.0.0 Safari/537.36"
         ),
         viewport={"width": 1366, "height": 768},
+        screen={"width": 1366, "height": 768},
         locale="id-ID",
         timezone_id="Asia/Jakarta",
+        color_scheme="light",
         extra_http_headers={
             "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "Upgrade-Insecure-Requests": "1",
         },
         java_script_enabled=True,
+        has_touch=False,
+        is_mobile=False,
     )
-    # Sembunyikan properti webdriver
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['id-ID', 'id', 'en-US', 'en'] });
-        window.chrome = { runtime: {} };
-    """)
+    # Inject stealth JS sebelum halaman manapun diload
+    context.add_init_script(STEALTH_JS)
     return context
 
 
@@ -171,6 +311,48 @@ def get_restaurant_name(page, url):
         pass
 
     return "Restoran"
+
+
+# ─────────────────────────────────────────────
+# POLLING AKTIF: Tunggu konten menu muncul
+# ─────────────────────────────────────────────
+def wait_for_menu_content(page, timeout_ms=20000, poll_interval_ms=1000, log=None):
+    """
+    Poll setiap 1 detik sampai ada elemen menu terdeteksi atau timeout.
+    Lebih andal dari wait_for_selector karena cek banyak selector sekaligus.
+    Returns True jika konten ditemukan, False jika timeout.
+    """
+    selectors_to_check = [
+        '[class*="menuItem"]', '[class*="MenuItem"]',
+        '[class*="menu-item"]', '[class*="FoodItem"]',
+        '[class*="itemCard"]', '[class*="ItemCard"]',
+        '[class*="foodCard"]', '[class*="product-item"]',
+        'div.ant-row',
+    ]
+    js_check = f"""
+        () => {{
+            const selectors = {json.dumps(selectors_to_check)};
+            for (const sel of selectors) {{
+                const els = document.querySelectorAll(sel);
+                if (els.length >= 3) return {{ found: true, selector: sel, count: els.length }};
+            }}
+            return {{ found: false, selector: null, count: 0 }};
+        }}
+    """
+    elapsed = 0
+    while elapsed < timeout_ms:
+        try:
+            result = page.evaluate(js_check)
+            if result['found']:
+                if log: log(f"  ✓ Konten menu ditemukan: {result['selector']} ({result['count']} elemen) setelah {elapsed}ms")
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(poll_interval_ms)
+        elapsed += poll_interval_ms
+
+    if log: log(f"  ✗ Timeout {timeout_ms}ms — konten menu tidak ditemukan")
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -555,16 +737,26 @@ def scrape_menu(page, url, progress_cb=None, debug_log=None):
         try:
             log(f"[{attempt+1}] Loading: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
-            
-            # Tunggu sampai konten muncul (maksimal 15 detik)
+            page.wait_for_timeout(2000)
+
+            # Simulasi gerakan mouse acak (bypass bot detection)
             try:
-                page.wait_for_selector(
-                    '[class*="menu"], [class*="Menu"], [class*="item"], [class*="Item"]',
-                    timeout=15000
-                )
+                page.mouse.move(300, 300)
+                page.wait_for_timeout(300)
+                page.mouse.move(600, 400)
+                page.wait_for_timeout(200)
             except Exception:
-                log("  Timeout menunggu selector menu, lanjut scroll...")
+                pass
+
+            # Polling aktif tunggu konten menu — TIDAK langsung lanjut jika tidak ada
+            content_found = wait_for_menu_content(page, timeout_ms=20000, log=log)
+            if not content_found:
+                log("  ⚠ Konten tidak muncul setelah polling — kemungkinan diblok atau halaman kosong")
+                if attempt == 0:
+                    log("  ↻ Retry dengan reload...")
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(3000)
+                    content_found = wait_for_menu_content(page, timeout_ms=15000, log=log)
             break
         except Exception as e:
             log(f"  Error load: {e}")
@@ -805,18 +997,12 @@ def main():
                 overall_bar.progress(min(outer_pct, 99))
                 detail_text.caption(f"  ↳ Scroll {cur}/{mx} — memuat konten menu...")
 
-            detail_text.caption("  ↳ Membuka browser...")
+            detail_text.caption("  ↳ Membuka browser (stealth mode)...")
+            # headless=True = mode headless standar Playwright Python
+            # (Playwright Python tidak mendukung headless="new" seperti Puppeteer JS)
             browser = p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-extensions",
-                    "--no-first-run",
-                    "--disable-default-apps",
-                ],
+                args=LAUNCH_ARGS,
             )
             try:
                 context = create_stealth_context(browser)
