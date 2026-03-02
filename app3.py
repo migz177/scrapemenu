@@ -444,17 +444,12 @@ def main():
         return
 
     st.markdown('<div class="main-title">GrabFood Menu Scraper</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sub-title">Versi Playwright — browser sungguhan di background, '
-        'tidak perlu login atau input cookie</div>',
-        unsafe_allow_html=True,
-    )
     st.markdown("""
     <div class="info-box">
         <strong>Cara pakai:</strong><br>
         1. Paste URL restoran GrabFood (satu per baris)<br>
         2. Klik <strong>Mulai Scraping</strong><br>
-        <small>~10–20 detik per restoran karena membuka browser sungguhan.</small>
+        <small>~10–20 detik per restoran</small>
     </div>
     """, unsafe_allow_html=True)
 
