@@ -30,6 +30,22 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+# ── Install Chromium binary otomatis (wajib untuk Streamlit Cloud) ──────────
+import subprocess, sys
+
+@st.cache_resource(show_spinner=False)
+def _install_playwright_browsers():
+    """Jalankan 'playwright install chromium' sekali saat startup."""
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True, capture_output=True,
+        )
+    except Exception as e:
+        st.warning(f"⚠️ Gagal install Chromium: {e}")
+
+_install_playwright_browsers()
+
 # ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
