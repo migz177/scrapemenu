@@ -435,7 +435,7 @@ def stat_card(label, value, small=False):
 def main():
     if not PLAYWRIGHT_AVAILABLE:
         st.error(
-            "❌ **Playwright tidak terinstall.**\n\n"
+            "**Playwright tidak terinstall.**\n\n"
             "Jalankan di VPS:\n"
             "```\npip install playwright\n"
             "playwright install chromium\n"
@@ -443,7 +443,7 @@ def main():
         )
         return
 
-    st.markdown('<div class="main-title">GrabFood Menu Scraper 🎭</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">GrabFood Menu Scraper</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-title">Versi Playwright — browser sungguhan di background, '
         'tidak perlu login atau input cookie</div>',
@@ -451,15 +451,15 @@ def main():
     )
     st.markdown("""
     <div class="info-box">
-        📌 <strong>Cara pakai:</strong><br>
+        <strong>Cara pakai:</strong><br>
         1. Paste URL restoran GrabFood (satu per baris)<br>
         2. Klik <strong>Mulai Scraping</strong><br>
-        <small>⏱️ ~10–20 detik per restoran karena membuka browser sungguhan.</small>
+        <small>~10–20 detik per restoran karena membuka browser sungguhan.</small>
     </div>
     """, unsafe_allow_html=True)
 
     urls_input = st.text_area(
-        "🔗 Link Restoran GrabFood (satu URL per baris)",
+        "Link Restoran GrabFood (satu URL per baris)",
         placeholder=(
             "https://food.grab.com/id/en/restaurant/go-steak-joglo-delivery/6-C6MCN2JDYC1AT\n"
             "https://food.grab.com/id/en/restaurant/nama-restoran-delivery/6-XXXXXXXX"
@@ -467,21 +467,21 @@ def main():
         height=130,
     )
 
-    with st.expander("📍 Lokasi default (dipakai jika koordinat tidak terdeteksi)"):
+    with st.expander("Lokasi default (dipakai jika koordinat tidak terdeteksi)"):
         c1, c2 = st.columns(2)
         with c1:
             lat = st.number_input("Latitude",  value=-6.2088,   format="%.6f")
         with c2:
             lng = st.number_input("Longitude", value=106.8456, format="%.6f")
 
-    with st.expander("⚙️ Pengaturan"):
+    with st.expander("Pengaturan"):
         timeout_s = st.slider("Timeout per restoran (detik)", 15, 60, 30, 5)
 
     col_btn, col_debug = st.columns([2, 1])
     with col_btn:
-        run_btn = st.button("🚀 Mulai Scraping")
+        run_btn = st.button("Mulai Scraping")
     with col_debug:
-        show_debug = st.toggle("🐛 Debug JSON", value=False)
+        show_debug = st.toggle("Debug JSON", value=False)
 
     if not run_btn:
         return
